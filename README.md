@@ -1,5 +1,7 @@
 # miniredis
 
+[![CI](https://github.com/ccchimi/miniredis/actions/workflows/ci.yml/badge.svg)](https://github.com/ccchimi/miniredis/actions/workflows/ci.yml)
+
 A small, from-scratch **key-value store server written in modern C++20**, wire-compatible with the [Redis](https://redis.io) protocol (RESP2). Because it speaks the real protocol, you can talk to it with the official `redis-cli` and drive load against it with `redis-benchmark`.
 
 This is a learning-oriented reimplementation of the core ideas behind an in-memory data store: TCP networking, protocol parsing, concurrent access to shared state, and a clean layered design.
@@ -71,12 +73,26 @@ OK
 (integer) 1
 ```
 
+## Tests
+
+Unit tests cover the store, the RESP parser/encoder, and command execution.
+Because the logic lives in a `miniredis_core` library separate from the socket
+layer, the tests run with no network involved, on any platform:
+
+```bash
+cmake -S . -B build
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+Every push runs them on Linux and Windows via GitHub Actions (see the badge above).
+
 ## Roadmap
 
 - [x] **Phase 1** — TCP server, RESP protocol, core commands, concurrency
 - [x] **Phase 2** — key expiration (TTL): `SET ... EX/PX`, `EXPIRE`, `TTL`, `PERSIST`, passive + active eviction
+- [x] **Phase 4** — unit tests + CI (GitHub Actions on Linux & Windows)
 - [ ] **Phase 3** — persistence (append-only file / snapshots)
-- [ ] **Phase 4** — unit tests, benchmarks, CI
 
 Note: the active expiration sweep currently scans all keys each tick; Redis
 instead samples a random subset to bound per-tick work. Worth revisiting if the

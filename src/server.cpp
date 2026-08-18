@@ -5,6 +5,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
+#include <chrono>
 #include <cstdio>
 #include <string>
 #include <thread>
@@ -107,6 +108,17 @@ int Server::run() {
 
     std::printf("miniredis listening on port %u\n", port_);
     std::fflush(stdout);
+
+    // Active expiration: a background thread periodically evicts expired keys
+    // so that memory is reclaimed even for keys no client ever touches again.
+    // Passive expiration (on access) still handles the common case instantly.
+    std::thread([this] {
+        using namespace std::chrono_literals;
+        while (true) {
+            std::this_thread::sleep_for(100ms);
+            store_.purgeExpired();
+        }
+    }).detach();
 
     while (true) {
         SOCKET clientSock = accept(listenSock, nullptr, nullptr);

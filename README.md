@@ -9,8 +9,23 @@ This is a learning-oriented reimplementation of the core ideas behind an in-memo
 - **RESP2 protocol** — connect with the standard `redis-cli`, no custom client needed
 - **Concurrent** — one thread per client over a thread-safe store; serves many clients at once
 - **Incremental parser** — correctly handles TCP fragmentation (half commands, batched commands)
-- **Commands:** `PING`, `ECHO`, `SET`, `GET`, `DEL`, `EXISTS`, `DBSIZE`, `COMMAND`
+- **Key expiration (TTL)** — both passive (evicted on access) and active (a background sweeper thread), just like Redis
 - **Zero dependencies** beyond the standard library and the OS sockets API
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `PING [msg]` | Health check; replies `PONG` or echoes `msg` |
+| `ECHO msg` | Returns `msg` |
+| `SET key value [EX secs \| PX ms]` | Stores a value, optionally with a time-to-live |
+| `GET key` | Returns the value, or nil if missing/expired |
+| `DEL key [key ...]` | Deletes keys; returns how many existed |
+| `EXISTS key [key ...]` | Returns how many of the keys exist |
+| `EXPIRE key secs` / `PEXPIRE key ms` | Sets a TTL on an existing key |
+| `TTL key` / `PTTL key` | Remaining life in seconds / ms (`-1` no expiry, `-2` no key) |
+| `PERSIST key` | Removes a key's TTL so it never expires |
+| `DBSIZE` | Number of keys currently stored |
 
 ## Architecture
 
@@ -59,9 +74,13 @@ OK
 ## Roadmap
 
 - [x] **Phase 1** — TCP server, RESP protocol, core commands, concurrency
-- [ ] **Phase 2** — key expiration (TTL), more data types, sharded locking
+- [x] **Phase 2** — key expiration (TTL): `SET ... EX/PX`, `EXPIRE`, `TTL`, `PERSIST`, passive + active eviction
 - [ ] **Phase 3** — persistence (append-only file / snapshots)
 - [ ] **Phase 4** — unit tests, benchmarks, CI
+
+Note: the active expiration sweep currently scans all keys each tick; Redis
+instead samples a random subset to bound per-tick work. Worth revisiting if the
+keyspace grows large.
 
 ## License
 

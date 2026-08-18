@@ -1,7 +1,10 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -11,9 +14,11 @@
 // Store: an in-memory, thread-safe key-value map with optional per-key expiry
 // and snapshot persistence.
 //
-// Every public method takes a single lock, so it is safe to call from many
-// client threads at once. This is the simplest correct design; in a later
-// phase we shard the map across several locks to reduce contention.
+// Concurrency: the keyspace is split into a fixed number of independently-locked
+// shards. A key is routed to a shard by its hash, so operations on different
+// keys usually take different locks and run in parallel; only keys that land in
+// the same shard contend. This scales far better than a single global lock when
+// many clients hit the server at once.
 //
 // Expiry is handled two ways, mirroring Redis:
 //   - passively: a key found to be expired on access is deleted and reported
@@ -86,13 +91,25 @@ private:
 
     using Map = std::unordered_map<std::string, Entry>;
 
-    // Both helpers must be called with mtx_ already held.
-    bool isExpired(const Entry& e) const;
-    // If the entry at `it` is expired, erases it and returns true (leaving `it`
-    // invalidated). Otherwise returns false and leaves `it` untouched.
-    bool eraseIfExpired(Map::iterator it);
+    // One independently-locked partition of the keyspace.
+    struct Shard {
+        Map data;
+        std::mutex mtx;
+    };
 
-    Map data_;
-    std::mutex mtx_;
+    // Power of two so key -> shard is a cheap bit-mask instead of a modulo.
+    static constexpr size_t kShardCount = 16;
+
+    Shard& shardFor(const std::string& key) {
+        return shards_[std::hash<std::string>{}(key) & (kShardCount - 1)];
+    }
+
+    // Helpers below must be called with the owning shard's mutex held.
+    bool isExpired(const Entry& e) const;
+    // If the entry at `it` is expired, erases it from `map` and returns true
+    // (leaving `it` invalidated). Otherwise returns false and leaves it alone.
+    bool eraseIfExpired(Map& map, Map::iterator it);
+
+    std::array<Shard, kShardCount> shards_;
     std::atomic<bool> dirty_{false};
 };

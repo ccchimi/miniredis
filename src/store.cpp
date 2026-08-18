@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <utility>
 
 using std::chrono::steady_clock;
 
@@ -66,9 +67,9 @@ bool Store::isExpired(const Entry& e) const {
     return e.hasExpiry && e.expireAt <= steady_clock::now();
 }
 
-bool Store::eraseIfExpired(Map::iterator it) {
-    if (it != data_.end() && isExpired(it->second)) {
-        data_.erase(it);
+bool Store::eraseIfExpired(Map& map, Map::iterator it) {
+    if (it != map.end() && isExpired(it->second)) {
+        map.erase(it);
         return true;
     }
     return false;
@@ -76,43 +77,46 @@ bool Store::eraseIfExpired(Map::iterator it) {
 
 void Store::set(const std::string& key, const std::string& value,
                 std::optional<std::chrono::milliseconds> ttl) {
-    std::lock_guard<std::mutex> lock(mtx_);
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
     Entry entry;
     entry.value = value;
     if (ttl) {
         entry.hasExpiry = true;
         entry.expireAt = steady_clock::now() + *ttl;
     }
-    data_[key] = std::move(entry);
+    shard.data[key] = std::move(entry);
     dirty_.store(true, std::memory_order_relaxed);
 }
 
 std::optional<std::string> Store::get(const std::string& key) {
-    std::lock_guard<std::mutex> lock(mtx_);
-    auto it = data_.find(key);
-    if (it == data_.end()) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = shard.data.find(key);
+    if (it == shard.data.end()) {
         return std::nullopt;
     }
-    if (eraseIfExpired(it)) {
+    if (eraseIfExpired(shard.data, it)) {
         return std::nullopt;
     }
     return it->second.value;
 }
 
 int Store::del(const std::vector<std::string>& keys) {
-    std::lock_guard<std::mutex> lock(mtx_);
     int removed = 0;
     for (const auto& key : keys) {
-        auto it = data_.find(key);
-        if (it == data_.end()) {
+        Shard& shard = shardFor(key);
+        std::lock_guard<std::mutex> lock(shard.mtx);
+        auto it = shard.data.find(key);
+        if (it == shard.data.end()) {
             continue;
         }
         // An already-expired key counts as "not there": drop it but do not
         // count it as a deletion.
-        if (eraseIfExpired(it)) {
+        if (eraseIfExpired(shard.data, it)) {
             continue;
         }
-        data_.erase(it);
+        shard.data.erase(it);
         ++removed;
     }
     if (removed > 0) {
@@ -122,14 +126,15 @@ int Store::del(const std::vector<std::string>& keys) {
 }
 
 int Store::exists(const std::vector<std::string>& keys) {
-    std::lock_guard<std::mutex> lock(mtx_);
     int count = 0;
     for (const auto& key : keys) {
-        auto it = data_.find(key);
-        if (it == data_.end()) {
+        Shard& shard = shardFor(key);
+        std::lock_guard<std::mutex> lock(shard.mtx);
+        auto it = shard.data.find(key);
+        if (it == shard.data.end()) {
             continue;
         }
-        if (eraseIfExpired(it)) {
+        if (eraseIfExpired(shard.data, it)) {
             continue;
         }
         ++count;
@@ -138,9 +143,10 @@ int Store::exists(const std::vector<std::string>& keys) {
 }
 
 bool Store::expire(const std::string& key, std::chrono::milliseconds ttl) {
-    std::lock_guard<std::mutex> lock(mtx_);
-    auto it = data_.find(key);
-    if (it == data_.end() || eraseIfExpired(it)) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = shard.data.find(key);
+    if (it == shard.data.end() || eraseIfExpired(shard.data, it)) {
         return false;
     }
     it->second.hasExpiry = true;
@@ -150,9 +156,10 @@ bool Store::expire(const std::string& key, std::chrono::milliseconds ttl) {
 }
 
 bool Store::persist(const std::string& key) {
-    std::lock_guard<std::mutex> lock(mtx_);
-    auto it = data_.find(key);
-    if (it == data_.end() || eraseIfExpired(it)) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = shard.data.find(key);
+    if (it == shard.data.end() || eraseIfExpired(shard.data, it)) {
         return false;
     }
     if (!it->second.hasExpiry) {
@@ -164,9 +171,10 @@ bool Store::persist(const std::string& key) {
 }
 
 long long Store::pttlMillis(const std::string& key) {
-    std::lock_guard<std::mutex> lock(mtx_);
-    auto it = data_.find(key);
-    if (it == data_.end() || eraseIfExpired(it)) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = shard.data.find(key);
+    if (it == shard.data.end() || eraseIfExpired(shard.data, it)) {
         return -2;
     }
     if (!it->second.hasExpiry) {
@@ -179,22 +187,29 @@ long long Store::pttlMillis(const std::string& key) {
 }
 
 size_t Store::size() {
-    std::lock_guard<std::mutex> lock(mtx_);
-    return data_.size();
+    size_t total = 0;
+    for (auto& shard : shards_) {
+        std::lock_guard<std::mutex> lock(shard.mtx);
+        total += shard.data.size();
+    }
+    return total;
 }
 
 size_t Store::purgeExpired() {
-    std::lock_guard<std::mutex> lock(mtx_);
-    auto now = steady_clock::now();
     size_t removed = 0;
-    // A full scan is O(n). Redis instead samples random keys to bound the work
-    // per tick; a full sweep is simpler and fine at this scale. See ROADMAP.
-    for (auto it = data_.begin(); it != data_.end();) {
-        if (it->second.hasExpiry && it->second.expireAt <= now) {
-            it = data_.erase(it);
-            ++removed;
-        } else {
-            ++it;
+    for (auto& shard : shards_) {
+        std::lock_guard<std::mutex> lock(shard.mtx);
+        auto now = steady_clock::now();
+        // A full scan per shard is O(n). Redis instead samples random keys to
+        // bound the work per tick; a full sweep is simpler and fine at this
+        // scale. See the ROADMAP note.
+        for (auto it = shard.data.begin(); it != shard.data.end();) {
+            if (it->second.hasExpiry && it->second.expireAt <= now) {
+                it = shard.data.erase(it);
+                ++removed;
+            } else {
+                ++it;
+            }
         }
     }
     if (removed > 0) {
@@ -208,18 +223,20 @@ bool Store::consumeDirty() {
 }
 
 bool Store::saveSnapshot(const std::string& path) {
-    // Build the whole snapshot into a buffer while holding the lock, then do
-    // the actual (slow) disk I/O with the lock released.
+    // Build the whole snapshot into a buffer, locking one shard at a time, then
+    // do the actual (slow) disk I/O with no locks held. Snapshotting shard by
+    // shard keeps each key internally consistent; there is no cross-shard
+    // invariant to preserve.
     std::string buf;
-    {
-        std::lock_guard<std::mutex> lock(mtx_);
-        auto now = steady_clock::now();
-        buf.append(kMagic, sizeof(kMagic));
-        const size_t countPos = buf.size();
-        putU32(buf, 0);  // placeholder, patched once we know the live count
+    buf.append(kMagic, sizeof(kMagic));
+    const size_t countPos = buf.size();
+    putU32(buf, 0);  // placeholder, patched once we know the live count
 
-        uint32_t count = 0;
-        for (const auto& [key, entry] : data_) {
+    uint32_t count = 0;
+    for (auto& shard : shards_) {
+        std::lock_guard<std::mutex> lock(shard.mtx);
+        auto now = steady_clock::now();
+        for (const auto& [key, entry] : shard.data) {
             int64_t ttlMs = -1;
             if (entry.hasExpiry) {
                 auto rem = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -237,9 +254,9 @@ bool Store::saveSnapshot(const std::string& path) {
             putI64(buf, ttlMs);
             ++count;
         }
-        for (int i = 0; i < 4; ++i) {
-            buf[countPos + i] = static_cast<char>((count >> (8 * i)) & 0xFF);
-        }
+    }
+    for (int i = 0; i < 4; ++i) {
+        buf[countPos + i] = static_cast<char>((count >> (8 * i)) & 0xFF);
     }
 
     namespace fs = std::filesystem;
@@ -295,8 +312,10 @@ bool Store::loadSnapshot(const std::string& path) {
         return false;
     }
 
-    std::lock_guard<std::mutex> lock(mtx_);
-    Map loaded;
+    // Parse everything into a temporary list first, so a corrupt file leaves
+    // the live store untouched instead of half-loaded.
+    std::vector<std::pair<std::string, Entry>> loaded;
+    loaded.reserve(count);
     auto now = steady_clock::now();
     for (uint32_t i = 0; i < count; ++i) {
         uint32_t keyLen = 0;
@@ -324,12 +343,19 @@ bool Store::loadSnapshot(const std::string& path) {
             entry.hasExpiry = true;
             entry.expireAt = now + std::chrono::milliseconds(ttlMs);
         }
-        loaded[std::move(key)] = std::move(entry);
+        loaded.emplace_back(std::move(key), std::move(entry));
     }
 
-    // Only swap in the fully-parsed data, so a corrupt file never leaves us
-    // with a half-loaded store.
-    data_ = std::move(loaded);
+    // Replace the keyspace: clear every shard, then route each entry home.
+    for (auto& shard : shards_) {
+        std::lock_guard<std::mutex> lock(shard.mtx);
+        shard.data.clear();
+    }
+    for (auto& [key, entry] : loaded) {
+        Shard& shard = shardFor(key);
+        std::lock_guard<std::mutex> lock(shard.mtx);
+        shard.data[key] = std::move(entry);
+    }
     dirty_.store(false, std::memory_order_relaxed);
     return true;
 }

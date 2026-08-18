@@ -9,7 +9,7 @@ This is a learning-oriented reimplementation of the core ideas behind an in-memo
 ## Features
 
 - **RESP2 protocol** — connect with the standard `redis-cli`, no custom client needed
-- **Concurrent** — one thread per client over a thread-safe store; serves many clients at once
+- **Concurrent** — one thread per client over a store split into independently-locked shards, so operations on different keys run in parallel
 - **Incremental parser** — correctly handles TCP fragmentation (half commands, batched commands)
 - **Key expiration (TTL)** — both passive (evicted on access) and active (a background sweeper thread), just like Redis
 - **Persistence** — the keyspace is snapshotted to disk and restored on restart, with TTLs preserved
@@ -133,7 +133,8 @@ Every push runs them on Linux and Windows via GitHub Actions (see the badge abov
 - [x] **Phase 4** — unit tests + CI (GitHub Actions on Linux & Windows)
 - [x] **Phase 3** — persistence: atomic binary snapshots, restored on startup, TTLs preserved
 - [x] **Phase 5** — portable socket layer (Winsock + POSIX): the server builds and runs on Windows, Linux, and macOS
-- [ ] **Next ideas** — more data types (lists, hashes), sharded locking, an event loop
+- [x] **Phase 6** — sharded locking: the keyspace is split into independently-locked partitions for parallel access
+- [ ] **Next ideas** — more data types (lists, hashes), an event loop
 
 Notes on current trade-offs, worth revisiting as the project grows:
 - The active expiration sweep scans all keys each tick; Redis instead samples a

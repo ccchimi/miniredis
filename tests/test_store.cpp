@@ -1,7 +1,10 @@
 #include "store.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include "framework.hpp"
 
@@ -78,5 +81,45 @@ void test_store() {
         CHECK(s.pttlMillis("k") > 0);
         s.set("k", "v2");                        // plain SET drops the TTL
         CHECK(s.pttlMillis("k") == -1);
+    }
+
+    // --- concurrency: many threads hammering the sharded store ---
+    {
+        Store s;
+        const int threadCount = 8;
+        const int perThread = 2000;
+
+        // Each thread writes its own disjoint set of keys.
+        std::vector<std::thread> writers;
+        for (int t = 0; t < threadCount; ++t) {
+            writers.emplace_back([&s, t, perThread] {
+                for (int i = 0; i < perThread; ++i) {
+                    s.set("t" + std::to_string(t) + "_" + std::to_string(i),
+                          "v");
+                }
+            });
+        }
+        for (auto& w : writers) {
+            w.join();
+        }
+        CHECK(s.size() == static_cast<size_t>(threadCount) * perThread);
+
+        // Now read them all back concurrently and count the hits.
+        std::atomic<int> found{0};
+        std::vector<std::thread> readers;
+        for (int t = 0; t < threadCount; ++t) {
+            readers.emplace_back([&s, &found, t, perThread] {
+                for (int i = 0; i < perThread; ++i) {
+                    if (s.get("t" + std::to_string(t) + "_" +
+                              std::to_string(i))) {
+                        found.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+            });
+        }
+        for (auto& r : readers) {
+            r.join();
+        }
+        CHECK(found.load() == threadCount * perThread);
     }
 }

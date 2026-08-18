@@ -61,7 +61,8 @@ On Windows with MinGW, add `-G "MinGW Makefiles"` to the configure step.
 ./build/miniredis 6400   # or a port of your choice
 ```
 
-Then, from another terminal:
+Then talk to it. The canonical client is the official **`redis-cli`**, since the
+server speaks the real RESP protocol:
 
 ```bash
 redis-cli -p 6379
@@ -71,6 +72,19 @@ OK
 "Ada"
 > EXISTS name missing
 (integer) 1
+```
+
+### No Redis installed? (`tools/mini-cli.ps1`)
+
+If you just want to try the server on Windows without installing Redis, a small
+interactive client is included as a convenience. It is not part of the server —
+just a demo helper that speaks the same protocol:
+
+```powershell
+# Terminal 1: start the server
+./build/miniredis 6400
+# Terminal 2: connect and type commands
+powershell -ExecutionPolicy Bypass -File ./tools/mini-cli.ps1 -Port 6400
 ```
 
 ## Tests

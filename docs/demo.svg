@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 520" width="720" height="520" font-family="monospace">
+  <style>
+    text { font-family: 'SFMono-Regular', 'Consolas', 'Menlo', monospace; font-size: 16px; }
+    .cmd  { fill: #e6edf3; }
+    .prm  { fill: #7ee787; }
+    .res  { fill: #8b949e; }
+    .ok   { fill: #7ee787; }
+  </style>
+
+  <!-- window -->
+  <rect x="4" y="4" width="712" height="512" rx="10" fill="#0d1117" stroke="#30363d" stroke-width="1.5"/>
+  <!-- title bar -->
+  <circle cx="28" cy="24" r="6" fill="#ff5f56"/>
+  <circle cx="48" cy="24" r="6" fill="#ffbd2e"/>
+  <circle cx="68" cy="24" r="6" fill="#27c93f"/>
+  <text x="360" y="29" text-anchor="middle" fill="#8b949e" font-size="13">miniredis</text>
+  <line x1="4" y1="44" x2="716" y2="44" stroke="#30363d" stroke-width="1"/>
+
+  <!-- header -->
+  <g opacity="1">
+    <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.022;0.05;0.911;1" dur="9s" repeatCount="indefinite"/>
+    <text x="24" y="80"><tspan class="prm">$ </tspan><tspan class="cmd">./miniredis 6400</tspan></text>
+    <text x="24" y="106" class="res">miniredis listening on port 6400</text>
+  </g>
+
+  <!-- SET -->
+  <g opacity="1">
+    <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.122;0.15;0.911;1" dur="9s" repeatCount="indefinite"/>
+    <text x="24" y="144"><tspan class="prm">&gt; </tspan><tspan class="cmd">SET user:1 "Ada Lovelace"</tspan></text>
+    <text x="24" y="170" class="ok">OK</text>
+  </g>
+
+  <!-- RPUSH -->
+  <g opacity="1">
+    <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.222;0.25;0.911;1" dur="9s" repeatCount="indefinite"/>
+    <text x="24" y="208"><tspan class="prm">&gt; </tspan><tspan class="cmd">RPUSH tasks code test ship</tspan></text>
+    <text x="24" y="234" class="res">(integer) 3</text>
+  </g>
+
+  <!-- LRANGE -->
+  <g opacity="1">
+    <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.322;0.35;0.911;1" dur="9s" repeatCount="indefinite"/>
+    <text x="24" y="272"><tspan class="prm">&gt; </tspan><tspan class="cmd">LRANGE tasks 0 -1</tspan></text>
+    <text x="24" y="298" class="res">1) "code"  2) "test"  3) "ship"</text>
+  </g>
+
+  <!-- ZADD -->
+  <g opacity="1">
+    <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.422;0.45;0.911;1" dur="9s" repeatCount="indefinite"/>
+    <text x="24" y="336"><tspan class="prm">&gt; </tspan><tspan class="cmd">ZADD score 250 beto 100 ana</tspan></text>
+    <text x="24" y="362" class="res">(integer) 2</text>
+  </g>
+
+  <!-- ZRANGE WITHSCORES -->
+  <g opacity="1">
+    <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.522;0.55;0.911;1" dur="9s" repeatCount="indefinite"/>
+    <text x="24" y="400"><tspan class="prm">&gt; </tspan><tspan class="cmd">ZRANGE score 0 -1 WITHSCORES</tspan></text>
+    <text x="24" y="426" class="res">1) "ana" 2) "100" 3) "beto" 4) "250"</text>
+  </g>
+
+  <!-- SET EX -->
+  <g opacity="1">
+    <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.622;0.65;0.911;1" dur="9s" repeatCount="indefinite"/>
+    <text x="24" y="464"><tspan class="prm">&gt; </tspan><tspan class="cmd">SET session xyz EX 60</tspan></text>
+    <text x="24" y="490" class="ok">OK</text>
+  </g>
+</svg>

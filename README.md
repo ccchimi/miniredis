@@ -6,6 +6,10 @@ A small, from-scratch **key-value store server written in modern C++20**, wire-c
 
 This is a learning-oriented reimplementation of the core ideas behind an in-memory data store: TCP networking, protocol parsing, concurrent access to shared state, and a clean layered design.
 
+<p align="center">
+  <img src="docs/demo.svg" alt="miniredis session: SET, RPUSH/LRANGE, ZADD/ZRANGE, and SET with a TTL" width="700">
+</p>
+
 ## Features
 
 - **RESP2 protocol** — connect with the standard `redis-cli`, no custom client needed

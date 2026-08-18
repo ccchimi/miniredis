@@ -27,13 +27,16 @@ add_library(miniredis_core STATIC
 )
 target_include_directories(miniredis_core PUBLIC include)
 
+# Threads: std::thread needs -pthread on POSIX; a no-op on Windows/MSVC.
+find_package(Threads REQUIRED)
+
 # --- Server executable: adds the networking layer. -----------------------
-# The networking uses Winsock, so the runnable server is built on Windows.
-# (Making the socket layer portable is a later step; the core + tests already
-# build and run everywhere.)
+# The socket code (net.hpp) is portable across Winsock and POSIX, so the server
+# builds and runs on Windows, Linux, and macOS.
+add_executable(miniredis src/main.cpp src/server.cpp)
+target_link_libraries(miniredis PRIVATE miniredis_core Threads::Threads)
 if(WIN32)
-    add_executable(miniredis src/main.cpp src/server.cpp)
-    target_link_libraries(miniredis PRIVATE miniredis_core ws2_32)
+    target_link_libraries(miniredis PRIVATE ws2_32)  # Winsock
 endif()
 
 # --- Tests ---------------------------------------------------------------
@@ -46,5 +49,5 @@ add_executable(miniredis_tests
     tests/test_persistence.cpp
     tests/test_main.cpp
 )
-target_link_libraries(miniredis_tests PRIVATE miniredis_core)
+target_link_libraries(miniredis_tests PRIVATE miniredis_core Threads::Threads)
 add_test(NAME unit COMMAND miniredis_tests)

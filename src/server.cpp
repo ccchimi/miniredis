@@ -1,9 +1,6 @@
 #include "server.hpp"
 
-// Winsock headers must come before <windows.h>; WIN32_LEAN_AND_MEAN trims it.
-#define WIN32_LEAN_AND_MEAN
-#include <winsock2.h>
-#include <ws2tcpip.h>
+#include "net.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -18,7 +15,7 @@ namespace {
 
 // Reads and serves commands on one client socket until it closes or errors.
 // Runs on its own thread; `store` is shared and does its own locking.
-void handleClient(SOCKET clientSock, Store& store) {
+void handleClient(net::socket_t clientSock, Store& store) {
     std::string inbuf;   // accumulates raw bytes across recv() calls
     char chunk[4096];
 
@@ -59,7 +56,7 @@ void handleClient(SOCKET clientSock, Store& store) {
         }
     }
 
-    closesocket(clientSock);
+    net::closeSocket(clientSock);
 }
 
 }  // namespace
@@ -79,16 +76,15 @@ int Server::run() {
                     snapshotPath_.c_str());
     }
 
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        std::fprintf(stderr, "WSAStartup failed\n");
+    if (!net::init()) {
+        std::fprintf(stderr, "socket subsystem init failed\n");
         return 1;
     }
 
-    SOCKET listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listenSock == INVALID_SOCKET) {
-        std::fprintf(stderr, "socket() failed: %d\n", WSAGetLastError());
-        WSACleanup();
+    net::socket_t listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listenSock == net::kInvalidSocket) {
+        std::fprintf(stderr, "socket() failed: %d\n", net::lastError());
+        net::cleanup();
         return 1;
     }
 
@@ -103,18 +99,18 @@ int Server::run() {
     addr.sin_port = htons(port_);
 
     if (bind(listenSock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) ==
-        SOCKET_ERROR) {
+        net::kSocketError) {
         std::fprintf(stderr, "bind() failed on port %u: %d\n", port_,
-                     WSAGetLastError());
-        closesocket(listenSock);
-        WSACleanup();
+                     net::lastError());
+        net::closeSocket(listenSock);
+        net::cleanup();
         return 1;
     }
 
-    if (listen(listenSock, SOMAXCONN) == SOCKET_ERROR) {
-        std::fprintf(stderr, "listen() failed: %d\n", WSAGetLastError());
-        closesocket(listenSock);
-        WSACleanup();
+    if (listen(listenSock, SOMAXCONN) == net::kSocketError) {
+        std::fprintf(stderr, "listen() failed: %d\n", net::lastError());
+        net::closeSocket(listenSock);
+        net::cleanup();
         return 1;
     }
 
@@ -148,9 +144,9 @@ int Server::run() {
     }).detach();
 
     while (true) {
-        SOCKET clientSock = accept(listenSock, nullptr, nullptr);
-        if (clientSock == INVALID_SOCKET) {
-            std::fprintf(stderr, "accept() failed: %d\n", WSAGetLastError());
+        net::socket_t clientSock = accept(listenSock, nullptr, nullptr);
+        if (clientSock == net::kInvalidSocket) {
+            std::fprintf(stderr, "accept() failed: %d\n", net::lastError());
             continue;
         }
         // Hand the connection to a detached worker thread and go back to
@@ -161,7 +157,7 @@ int Server::run() {
 
     // Unreachable in this phase (the accept loop never returns), but kept for
     // when we add graceful shutdown.
-    closesocket(listenSock);
-    WSACleanup();
+    net::closeSocket(listenSock);
+    net::cleanup();
     return 0;
 }

@@ -13,6 +13,7 @@ This is a learning-oriented reimplementation of the core ideas behind an in-memo
 - **Incremental parser** — correctly handles TCP fragmentation (half commands, batched commands)
 - **Key expiration (TTL)** — both passive (evicted on access) and active (a background sweeper thread), just like Redis
 - **Persistence** — the keyspace is snapshotted to disk and restored on restart, with TTLs preserved
+- **Cross-platform** — the socket layer builds on Windows (Winsock), Linux, and macOS (POSIX)
 - **Zero dependencies** beyond the standard library and the OS sockets API
 
 ## Commands
@@ -40,6 +41,7 @@ The code is split into layers so each piece can be understood and tested on its 
 | `resp.{hpp,cpp}` | RESP protocol parsing and reply encoding (the wire format) |
 | `commands.{hpp,cpp}` | Command execution — pure logic, knows nothing about sockets |
 | `server.{hpp,cpp}` | TCP accept loop and per-client threads (the networking) |
+| `net.hpp` | Cross-platform socket shim (Winsock / POSIX) |
 | `main.cpp` | Entry point / argument parsing |
 
 The `commands` layer takes a `Store` and a parsed argument list and returns reply bytes, so it can be unit-tested without any network.
@@ -130,7 +132,8 @@ Every push runs them on Linux and Windows via GitHub Actions (see the badge abov
 - [x] **Phase 2** — key expiration (TTL): `SET ... EX/PX`, `EXPIRE`, `TTL`, `PERSIST`, passive + active eviction
 - [x] **Phase 4** — unit tests + CI (GitHub Actions on Linux & Windows)
 - [x] **Phase 3** — persistence: atomic binary snapshots, restored on startup, TTLs preserved
-- [ ] **Next ideas** — more data types (lists, hashes), sharded locking, an event loop, a portable (POSIX) socket layer
+- [x] **Phase 5** — portable socket layer (Winsock + POSIX): the server builds and runs on Windows, Linux, and macOS
+- [ ] **Next ideas** — more data types (lists, hashes), sharded locking, an event loop
 
 Notes on current trade-offs, worth revisiting as the project grows:
 - The active expiration sweep scans all keys each tick; Redis instead samples a

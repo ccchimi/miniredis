@@ -5,9 +5,13 @@
 
 #include "server.hpp"
 
-// Entry point. Usage: miniredis [port]   (default port 6379, same as Redis)
+// Entry point.
+// Usage: miniredis [port] [snapshot-file]
+//   port          TCP port to listen on   (default 6379, same as Redis)
+//   snapshot-file where the keyspace is persisted (default dump.mrdb)
 int main(int argc, char** argv) {
     uint16_t port = 6379;
+    std::string snapshotPath = "dump.mrdb";
 
     if (argc > 1) {
         int parsed = std::atoi(argv[1]);
@@ -18,7 +22,10 @@ int main(int argc, char** argv) {
         }
         port = static_cast<uint16_t>(parsed);
     }
+    if (argc > 2) {
+        snapshotPath = argv[2];
+    }
 
-    Server server(port);
+    Server server(port, snapshotPath);
     return server.run();
 }

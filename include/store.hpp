@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <mutex>
 #include <optional>
@@ -7,7 +8,8 @@
 #include <unordered_map>
 #include <vector>
 
-// Store: an in-memory, thread-safe key-value map with optional per-key expiry.
+// Store: an in-memory, thread-safe key-value map with optional per-key expiry
+// and snapshot persistence.
 //
 // Every public method takes a single lock, so it is safe to call from many
 // client threads at once. This is the simplest correct design; in a later
@@ -17,6 +19,9 @@
 //   - passively: a key found to be expired on access is deleted and reported
 //     as missing;
 //   - actively: a background thread periodically calls purgeExpired().
+//
+// Durability is provided by snapshots: saveSnapshot() writes the whole
+// keyspace to a file and loadSnapshot() restores it on startup.
 class Store {
 public:
     // Inserts or overwrites the value for `key`. Any existing expiry is
@@ -57,6 +62,21 @@ public:
     // Intended to be called periodically by a background thread.
     size_t purgeExpired();
 
+    // --- Persistence (snapshot / RDB-style) -----------------------------
+    // Atomically writes the whole keyspace to `path` (temp file + rename).
+    // Already-expired keys are skipped; live keys record their *remaining* TTL
+    // so it is preserved across a restart. Returns false on an I/O error.
+    bool saveSnapshot(const std::string& path);
+
+    // Replaces the keyspace with the contents of `path`. A missing file is
+    // treated as an empty database and returns true. Returns false only if the
+    // file exists but is unreadable or corrupt.
+    bool loadSnapshot(const std::string& path);
+
+    // Returns whether any key changed since the previous call, clearing the
+    // flag. A background saver uses this to skip rewriting an unchanged dataset.
+    bool consumeDirty();
+
 private:
     struct Entry {
         std::string value;
@@ -74,4 +94,5 @@ private:
 
     Map data_;
     std::mutex mtx_;
+    std::atomic<bool> dirty_{false};
 };

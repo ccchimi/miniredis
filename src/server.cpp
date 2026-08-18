@@ -64,9 +64,21 @@ void handleClient(SOCKET clientSock, Store& store) {
 
 }  // namespace
 
-Server::Server(uint16_t port) : port_(port) {}
+Server::Server(uint16_t port, std::string snapshotPath)
+    : port_(port), snapshotPath_(std::move(snapshotPath)) {}
 
 int Server::run() {
+    // Restore any previously-saved data before accepting clients.
+    if (!store_.loadSnapshot(snapshotPath_)) {
+        std::fprintf(stderr,
+                     "warning: snapshot '%s' is unreadable or corrupt; "
+                     "starting empty\n",
+                     snapshotPath_.c_str());
+    } else if (store_.size() > 0) {
+        std::printf("loaded %zu keys from %s\n", store_.size(),
+                    snapshotPath_.c_str());
+    }
+
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         std::fprintf(stderr, "WSAStartup failed\n");
@@ -117,6 +129,21 @@ int Server::run() {
         while (true) {
             std::this_thread::sleep_for(100ms);
             store_.purgeExpired();
+        }
+    }).detach();
+
+    // Periodic snapshot: every few seconds, if anything changed, persist the
+    // keyspace so it survives a restart. Skipping unchanged datasets (via
+    // consumeDirty) avoids pointless disk writes on an idle server.
+    std::thread([this] {
+        using namespace std::chrono_literals;
+        while (true) {
+            std::this_thread::sleep_for(5s);
+            if (store_.consumeDirty()) {
+                if (!store_.saveSnapshot(snapshotPath_)) {
+                    std::fprintf(stderr, "warning: failed to save snapshot\n");
+                }
+            }
         }
     }).detach();
 

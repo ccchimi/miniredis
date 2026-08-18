@@ -30,3 +30,4 @@ void reportEq(const std::string& a, const std::string& b, const char* aExpr,
 void test_store();
 void test_resp();
 void test_commands();
+void test_persistence();

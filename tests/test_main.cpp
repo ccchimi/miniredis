@@ -11,6 +11,8 @@ int main() {
     test_resp();
     std::printf("running commands tests...\n");
     test_commands();
+    std::printf("running persistence tests...\n");
+    test_persistence();
 
     std::printf("\n%d checks, %d failures\n", testing::g_checks,
                 testing::g_failures);

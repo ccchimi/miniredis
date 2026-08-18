@@ -88,6 +88,9 @@ just a demo helper that speaks the same protocol:
 powershell -ExecutionPolicy Bypass -File ./tools/mini-cli.ps1 -Port 6400
 ```
 
+On Windows you can also just double-click **`run-server.bat`** to start the
+server and **`run-client.bat`** to open the client (both default to port 6400).
+
 ## Persistence
 
 The keyspace is saved to a snapshot file (`dump.mrdb` by default; pass a path as

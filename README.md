@@ -15,6 +15,7 @@ This is a learning-oriented reimplementation of the core ideas behind an in-memo
 - **Key expiration (TTL)** — both passive (evicted on access) and active (a background sweeper thread), just like Redis
 - **Persistence** — the keyspace is snapshotted to disk and restored on restart, with TTLs preserved
 - **Cross-platform** — the socket layer builds on Windows (Winsock), Linux, and macOS (POSIX)
+- **Fast** — a bundled benchmark sustains ~235k ops/sec over 50 concurrent clients
 - **Zero dependencies** beyond the standard library and the OS sockets API
 
 ## Commands
@@ -152,6 +153,29 @@ ctest --test-dir build --output-on-failure
 
 Every push runs them on Linux and Windows via GitHub Actions (see the badge above).
 
+## Benchmarks
+
+A bundled load generator (`bench/bench.cpp`) opens many concurrent connections
+and fires synchronous commands, reporting aggregate throughput. Start the server,
+then run the benchmark against it:
+
+```bash
+./build/miniredis 6400                     # terminal 1
+./build/miniredis_bench 6400 50 200000     # terminal 2: port, clients, requests
+```
+
+Representative results on the development machine (Windows, MinGW GCC 16,
+thread-per-client, over loopback), 50 concurrent clients:
+
+| Workload | Throughput |
+|----------|------------|
+| `SET`    | ~235,000 ops/sec |
+| `GET`    | ~235,000 ops/sec |
+
+Numbers vary by hardware — run it on yours. The point is that the sharded store
+and per-client threads sustain hundreds of thousands of operations per second
+without an event loop.
+
 ## Roadmap
 
 - [x] **Phase 1** — TCP server, RESP protocol, core commands, concurrency
@@ -161,6 +185,7 @@ Every push runs them on Linux and Windows via GitHub Actions (see the badge abov
 - [x] **Phase 5** — portable socket layer (Winsock + POSIX): the server builds and runs on Windows, Linux, and macOS
 - [x] **Phase 6** — sharded locking: the keyspace is split into independently-locked partitions for parallel access
 - [x] **Phase 7** — data types: lists and hashes, `TYPE`, and `WRONGTYPE` errors
+- [x] **Phase 8** — a concurrent benchmark client and published throughput numbers
 - [ ] **Next ideas** — sorted sets, an event loop (epoll/IOCP) instead of thread-per-client
 
 Notes on current trade-offs, worth revisiting as the project grows:

@@ -39,6 +39,15 @@ if(WIN32)
     target_link_libraries(miniredis PRIVATE ws2_32)  # Winsock
 endif()
 
+# --- Benchmark client ----------------------------------------------------
+# A standalone load generator; talks to a running server over TCP.
+add_executable(miniredis_bench bench/bench.cpp)
+target_include_directories(miniredis_bench PRIVATE include)
+target_link_libraries(miniredis_bench PRIVATE Threads::Threads)
+if(WIN32)
+    target_link_libraries(miniredis_bench PRIVATE ws2_32)
+endif()
+
 # --- Tests ---------------------------------------------------------------
 enable_testing()
 add_executable(miniredis_tests

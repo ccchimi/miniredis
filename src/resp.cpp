@@ -126,4 +126,16 @@ std::string encodeNil() {
     return "$-1\r\n";
 }
 
+std::string encodeNilArray() {
+    return "*-1\r\n";
+}
+
+std::string encodeArray(const std::vector<std::string>& items) {
+    std::string out = "*" + std::to_string(items.size()) + "\r\n";
+    for (const auto& item : items) {
+        out += encodeBulkString(item);
+    }
+    return out;
+}
+
 }  // namespace resp

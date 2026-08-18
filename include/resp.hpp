@@ -38,5 +38,9 @@ std::string encodeError(const std::string& msg);       // -msg\r\n
 std::string encodeInteger(long long n);                // :n\r\n
 std::string encodeBulkString(const std::string& s);    // $len\r\ns\r\n
 std::string encodeNil();                                // $-1\r\n
+std::string encodeNilArray();                           // *-1\r\n
+
+// Encodes a list of strings as a RESP array of bulk strings.
+std::string encodeArray(const std::vector<std::string>& items);
 
 }  // namespace resp

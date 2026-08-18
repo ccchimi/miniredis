@@ -11,6 +11,7 @@ This is a learning-oriented reimplementation of the core ideas behind an in-memo
 - **RESP2 protocol** — connect with the standard `redis-cli`, no custom client needed
 - **Concurrent** — one thread per client over a store split into independently-locked shards, so operations on different keys run in parallel
 - **Incremental parser** — correctly handles TCP fragmentation (half commands, batched commands)
+- **Data types** — strings, lists, and hashes, with `WRONGTYPE` errors when a command targets the wrong type
 - **Key expiration (TTL)** — both passive (evicted on access) and active (a background sweeper thread), just like Redis
 - **Persistence** — the keyspace is snapshotted to disk and restored on restart, with TTLs preserved
 - **Cross-platform** — the socket layer builds on Windows (Winsock), Linux, and macOS (POSIX)
@@ -18,18 +19,43 @@ This is a learning-oriented reimplementation of the core ideas behind an in-memo
 
 ## Commands
 
+**Strings & keys**
+
 | Command | Description |
 |---------|-------------|
 | `PING [msg]` | Health check; replies `PONG` or echoes `msg` |
 | `ECHO msg` | Returns `msg` |
-| `SET key value [EX secs \| PX ms]` | Stores a value, optionally with a time-to-live |
+| `SET key value [EX secs \| PX ms]` | Stores a string, optionally with a time-to-live |
 | `GET key` | Returns the value, or nil if missing/expired |
 | `DEL key [key ...]` | Deletes keys; returns how many existed |
 | `EXISTS key [key ...]` | Returns how many of the keys exist |
+| `TYPE key` | Returns the key's type (`string`, `list`, `hash`, or `none`) |
 | `EXPIRE key secs` / `PEXPIRE key ms` | Sets a TTL on an existing key |
 | `TTL key` / `PTTL key` | Remaining life in seconds / ms (`-1` no expiry, `-2` no key) |
 | `PERSIST key` | Removes a key's TTL so it never expires |
 | `DBSIZE` | Number of keys currently stored |
+
+**Lists**
+
+| Command | Description |
+|---------|-------------|
+| `LPUSH key v [v ...]` / `RPUSH key v [v ...]` | Push values to the head / tail; returns the new length |
+| `LPOP key [count]` / `RPOP key [count]` | Pop from the head / tail (one, or `count`) |
+| `LRANGE key start stop` | Elements in a range (negative indices count from the end) |
+| `LLEN key` | Number of elements |
+
+**Hashes**
+
+| Command | Description |
+|---------|-------------|
+| `HSET key field value [field value ...]` | Set fields; returns how many were newly added |
+| `HGET key field` | Returns a field's value, or nil |
+| `HDEL key field [field ...]` | Deletes fields; returns how many existed |
+| `HEXISTS key field` | 1 if the field exists, else 0 |
+| `HLEN key` | Number of fields |
+| `HGETALL key` | All field/value pairs |
+
+Operating on a key with a command for the wrong type returns a `WRONGTYPE` error, as in Redis.
 
 ## Architecture
 
@@ -37,7 +63,7 @@ The code is split into layers so each piece can be understood and tested on its 
 
 | File | Responsibility |
 |------|----------------|
-| `store.{hpp,cpp}` | Thread-safe key/value map: the data, TTLs, and snapshot save/load |
+| `store.{hpp,cpp}` | Sharded, thread-safe store: strings/lists/hashes, TTLs, and snapshot save/load |
 | `resp.{hpp,cpp}` | RESP protocol parsing and reply encoding (the wire format) |
 | `commands.{hpp,cpp}` | Command execution — pure logic, knows nothing about sockets |
 | `server.{hpp,cpp}` | TCP accept loop and per-client threads (the networking) |
@@ -134,7 +160,8 @@ Every push runs them on Linux and Windows via GitHub Actions (see the badge abov
 - [x] **Phase 3** — persistence: atomic binary snapshots, restored on startup, TTLs preserved
 - [x] **Phase 5** — portable socket layer (Winsock + POSIX): the server builds and runs on Windows, Linux, and macOS
 - [x] **Phase 6** — sharded locking: the keyspace is split into independently-locked partitions for parallel access
-- [ ] **Next ideas** — more data types (lists, hashes), an event loop
+- [x] **Phase 7** — data types: lists and hashes, `TYPE`, and `WRONGTYPE` errors
+- [ ] **Next ideas** — sorted sets, an event loop (epoll/IOCP) instead of thread-per-client
 
 Notes on current trade-offs, worth revisiting as the project grows:
 - The active expiration sweep scans all keys each tick; Redis instead samples a

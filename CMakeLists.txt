@@ -46,6 +46,7 @@ add_executable(miniredis_tests
     tests/test_store.cpp
     tests/test_resp.cpp
     tests/test_commands.cpp
+    tests/test_types.cpp
     tests/test_persistence.cpp
     tests/test_main.cpp
 )

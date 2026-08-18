@@ -10,16 +10,21 @@ using std::chrono::steady_clock;
 
 namespace {
 
-// Snapshot binary format (little-endian, length-prefixed so keys and values
-// may contain any bytes, including spaces and newlines):
-//
-//   "MINIRDS1"            8-byte magic
-//   uint32   count        number of entries
-//   repeated count times:
-//     uint32  keyLen,  key bytes
-//     uint32  valLen,  value bytes
-//     int64   ttlMs    -1 for no expiry, else remaining milliseconds
-constexpr char kMagic[8] = {'M', 'I', 'N', 'I', 'R', 'D', 'S', '1'};
+// Snapshot binary format v2 (little-endian, length-prefixed so all bytes are
+// safe). Header: "MINIRDS2" magic, then uint32 entry count. Each entry:
+//   uint32 keyLen, key bytes
+//   uint8  type            0 = string, 1 = list, 2 = hash
+//   payload:
+//     string: uint32 len, bytes
+//     list:   uint32 count, then count x (uint32 len, bytes)
+//     hash:   uint32 count, then count x (uint32 fLen, field, uint32 vLen, val)
+//   int64  ttlMs           -1 = no expiry, else remaining milliseconds
+constexpr char kMagic[8] = {'M', 'I', 'N', 'I', 'R', 'D', 'S', '2'};
+constexpr uint8_t kTypeString = 0;
+constexpr uint8_t kTypeList = 1;
+constexpr uint8_t kTypeHash = 2;
+
+void putU8(std::string& out, uint8_t v) { out.push_back(static_cast<char>(v)); }
 
 void putU32(std::string& out, uint32_t v) {
     for (int i = 0; i < 4; ++i) {
@@ -32,6 +37,21 @@ void putI64(std::string& out, int64_t v) {
     for (int i = 0; i < 8; ++i) {
         out.push_back(static_cast<char>((u >> (8 * i)) & 0xFF));
     }
+}
+
+// Appends a length-prefixed blob.
+void putBlob(std::string& out, const std::string& s) {
+    putU32(out, static_cast<uint32_t>(s.size()));
+    out.append(s);
+}
+
+bool getU8(const std::string& s, size_t& p, uint8_t& v) {
+    if (p + 1 > s.size()) {
+        return false;
+    }
+    v = static_cast<uint8_t>(s[p]);
+    p += 1;
+    return true;
 }
 
 bool getU32(const std::string& s, size_t& p, uint32_t& v) {
@@ -61,26 +81,40 @@ bool getI64(const std::string& s, size_t& p, int64_t& v) {
     return true;
 }
 
+// Reads a length-prefixed blob into `out`.
+bool getBlob(const std::string& s, size_t& p, std::string& out) {
+    uint32_t len = 0;
+    if (!getU32(s, p, len) || p + len > s.size()) {
+        return false;
+    }
+    out.assign(s, p, len);
+    p += len;
+    return true;
+}
+
 }  // namespace
 
 bool Store::isExpired(const Entry& e) const {
     return e.hasExpiry && e.expireAt <= steady_clock::now();
 }
 
-bool Store::eraseIfExpired(Map& map, Map::iterator it) {
+Store::Map::iterator Store::findLive(Map& map, const std::string& key) {
+    auto it = map.find(key);
     if (it != map.end() && isExpired(it->second)) {
         map.erase(it);
-        return true;
+        return map.end();
     }
-    return false;
+    return it;
 }
+
+// --- Strings ------------------------------------------------------------
 
 void Store::set(const std::string& key, const std::string& value,
                 std::optional<std::chrono::milliseconds> ttl) {
     Shard& shard = shardFor(key);
     std::lock_guard<std::mutex> lock(shard.mtx);
     Entry entry;
-    entry.value = value;
+    entry.value = value;  // string alternative
     if (ttl) {
         entry.hasExpiry = true;
         entry.expireAt = steady_clock::now() + *ttl;
@@ -92,28 +126,25 @@ void Store::set(const std::string& key, const std::string& value,
 std::optional<std::string> Store::get(const std::string& key) {
     Shard& shard = shardFor(key);
     std::lock_guard<std::mutex> lock(shard.mtx);
-    auto it = shard.data.find(key);
+    auto it = findLive(shard.data, key);
     if (it == shard.data.end()) {
         return std::nullopt;
     }
-    if (eraseIfExpired(shard.data, it)) {
-        return std::nullopt;
+    if (auto* s = std::get_if<std::string>(&it->second.value)) {
+        return *s;
     }
-    return it->second.value;
+    return std::nullopt;  // wrong type: GET treats it as absent
 }
+
+// --- Generic ------------------------------------------------------------
 
 int Store::del(const std::vector<std::string>& keys) {
     int removed = 0;
     for (const auto& key : keys) {
         Shard& shard = shardFor(key);
         std::lock_guard<std::mutex> lock(shard.mtx);
-        auto it = shard.data.find(key);
+        auto it = findLive(shard.data, key);
         if (it == shard.data.end()) {
-            continue;
-        }
-        // An already-expired key counts as "not there": drop it but do not
-        // count it as a deletion.
-        if (eraseIfExpired(shard.data, it)) {
             continue;
         }
         shard.data.erase(it);
@@ -130,14 +161,9 @@ int Store::exists(const std::vector<std::string>& keys) {
     for (const auto& key : keys) {
         Shard& shard = shardFor(key);
         std::lock_guard<std::mutex> lock(shard.mtx);
-        auto it = shard.data.find(key);
-        if (it == shard.data.end()) {
-            continue;
+        if (findLive(shard.data, key) != shard.data.end()) {
+            ++count;
         }
-        if (eraseIfExpired(shard.data, it)) {
-            continue;
-        }
-        ++count;
     }
     return count;
 }
@@ -145,8 +171,8 @@ int Store::exists(const std::vector<std::string>& keys) {
 bool Store::expire(const std::string& key, std::chrono::milliseconds ttl) {
     Shard& shard = shardFor(key);
     std::lock_guard<std::mutex> lock(shard.mtx);
-    auto it = shard.data.find(key);
-    if (it == shard.data.end() || eraseIfExpired(shard.data, it)) {
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
         return false;
     }
     it->second.hasExpiry = true;
@@ -158,11 +184,8 @@ bool Store::expire(const std::string& key, std::chrono::milliseconds ttl) {
 bool Store::persist(const std::string& key) {
     Shard& shard = shardFor(key);
     std::lock_guard<std::mutex> lock(shard.mtx);
-    auto it = shard.data.find(key);
-    if (it == shard.data.end() || eraseIfExpired(shard.data, it)) {
-        return false;
-    }
-    if (!it->second.hasExpiry) {
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end() || !it->second.hasExpiry) {
         return false;
     }
     it->second.hasExpiry = false;
@@ -173,8 +196,8 @@ bool Store::persist(const std::string& key) {
 long long Store::pttlMillis(const std::string& key) {
     Shard& shard = shardFor(key);
     std::lock_guard<std::mutex> lock(shard.mtx);
-    auto it = shard.data.find(key);
-    if (it == shard.data.end() || eraseIfExpired(shard.data, it)) {
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
         return -2;
     }
     if (!it->second.hasExpiry) {
@@ -200,9 +223,6 @@ size_t Store::purgeExpired() {
     for (auto& shard : shards_) {
         std::lock_guard<std::mutex> lock(shard.mtx);
         auto now = steady_clock::now();
-        // A full scan per shard is O(n). Redis instead samples random keys to
-        // bound the work per tick; a full sweep is simpler and fine at this
-        // scale. See the ROADMAP note.
         for (auto it = shard.data.begin(); it != shard.data.end();) {
             if (it->second.hasExpiry && it->second.expireAt <= now) {
                 it = shard.data.erase(it);
@@ -218,19 +238,300 @@ size_t Store::purgeExpired() {
     return removed;
 }
 
+std::string Store::typeName(const std::string& key) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
+        return "none";
+    }
+    if (std::holds_alternative<std::string>(it->second.value)) {
+        return "string";
+    }
+    if (std::holds_alternative<ListType>(it->second.value)) {
+        return "list";
+    }
+    return "hash";
+}
+
+// --- Lists --------------------------------------------------------------
+
+namespace {
+
+// Normalizes a possibly-negative Redis index against a length.
+long long normalizeIndex(long long i, long long len) {
+    if (i < 0) {
+        i += len;
+    }
+    return i;
+}
+
+}  // namespace
+
+std::optional<long long> Store::lpush(const std::string& key,
+                                      const std::vector<std::string>& values) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
+        it = shard.data.emplace(key, Entry{ListType{}, false, {}}).first;
+    }
+    auto* list = std::get_if<ListType>(&it->second.value);
+    if (!list) {
+        return std::nullopt;  // WRONGTYPE
+    }
+    for (const auto& v : values) {
+        list->push_front(v);
+    }
+    dirty_.store(true, std::memory_order_relaxed);
+    return static_cast<long long>(list->size());
+}
+
+std::optional<long long> Store::rpush(const std::string& key,
+                                      const std::vector<std::string>& values) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
+        it = shard.data.emplace(key, Entry{ListType{}, false, {}}).first;
+    }
+    auto* list = std::get_if<ListType>(&it->second.value);
+    if (!list) {
+        return std::nullopt;  // WRONGTYPE
+    }
+    for (const auto& v : values) {
+        list->push_back(v);
+    }
+    dirty_.store(true, std::memory_order_relaxed);
+    return static_cast<long long>(list->size());
+}
+
+std::optional<long long> Store::llen(const std::string& key) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
+        return 0;
+    }
+    auto* list = std::get_if<ListType>(&it->second.value);
+    if (!list) {
+        return std::nullopt;  // WRONGTYPE
+    }
+    return static_cast<long long>(list->size());
+}
+
+Store::SeqResult Store::lrange(const std::string& key, long long start,
+                               long long stop) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
+        return {};  // empty list
+    }
+    auto* list = std::get_if<ListType>(&it->second.value);
+    if (!list) {
+        return {true, {}};  // WRONGTYPE
+    }
+
+    const long long len = static_cast<long long>(list->size());
+    start = normalizeIndex(start, len);
+    stop = normalizeIndex(stop, len);
+    if (start < 0) {
+        start = 0;
+    }
+    if (stop >= len) {
+        stop = len - 1;
+    }
+
+    SeqResult out;
+    for (long long i = start; i <= stop && i < len; ++i) {
+        if (i < 0) {
+            continue;
+        }
+        out.items.push_back((*list)[static_cast<size_t>(i)]);
+    }
+    return out;
+}
+
+Store::PopResult Store::lpop(const std::string& key, long long count) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
+        return {};  // key missing -> values stays nullopt
+    }
+    auto* list = std::get_if<ListType>(&it->second.value);
+    if (!list) {
+        return {true, std::nullopt};  // WRONGTYPE
+    }
+    std::vector<std::string> popped;
+    long long n = std::min<long long>(count, static_cast<long long>(list->size()));
+    for (long long i = 0; i < n; ++i) {
+        popped.push_back(std::move(list->front()));
+        list->pop_front();
+    }
+    if (list->empty()) {
+        shard.data.erase(it);
+    }
+    dirty_.store(true, std::memory_order_relaxed);
+    return {false, std::move(popped)};
+}
+
+Store::PopResult Store::rpop(const std::string& key, long long count) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
+        return {};
+    }
+    auto* list = std::get_if<ListType>(&it->second.value);
+    if (!list) {
+        return {true, std::nullopt};  // WRONGTYPE
+    }
+    std::vector<std::string> popped;
+    long long n = std::min<long long>(count, static_cast<long long>(list->size()));
+    for (long long i = 0; i < n; ++i) {
+        popped.push_back(std::move(list->back()));
+        list->pop_back();
+    }
+    if (list->empty()) {
+        shard.data.erase(it);
+    }
+    dirty_.store(true, std::memory_order_relaxed);
+    return {false, std::move(popped)};
+}
+
+// --- Hashes -------------------------------------------------------------
+
+std::optional<long long> Store::hset(
+    const std::string& key,
+    const std::vector<std::pair<std::string, std::string>>& fieldValues) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
+        it = shard.data.emplace(key, Entry{HashType{}, false, {}}).first;
+    }
+    auto* hash = std::get_if<HashType>(&it->second.value);
+    if (!hash) {
+        return std::nullopt;  // WRONGTYPE
+    }
+    long long added = 0;
+    for (const auto& [field, value] : fieldValues) {
+        auto [pos, inserted] = hash->insert_or_assign(field, value);
+        (void)pos;
+        if (inserted) {
+            ++added;
+        }
+    }
+    dirty_.store(true, std::memory_order_relaxed);
+    return added;
+}
+
+Store::ValueResult Store::hget(const std::string& key,
+                               const std::string& field) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
+        return {};  // missing
+    }
+    auto* hash = std::get_if<HashType>(&it->second.value);
+    if (!hash) {
+        return {true, std::nullopt};  // WRONGTYPE
+    }
+    auto f = hash->find(field);
+    if (f == hash->end()) {
+        return {};
+    }
+    return {false, f->second};
+}
+
+std::optional<long long> Store::hdel(const std::string& key,
+                                     const std::vector<std::string>& fields) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
+        return 0;
+    }
+    auto* hash = std::get_if<HashType>(&it->second.value);
+    if (!hash) {
+        return std::nullopt;  // WRONGTYPE
+    }
+    long long removed = 0;
+    for (const auto& field : fields) {
+        removed += static_cast<long long>(hash->erase(field));
+    }
+    if (hash->empty()) {
+        shard.data.erase(it);
+    }
+    if (removed > 0) {
+        dirty_.store(true, std::memory_order_relaxed);
+    }
+    return removed;
+}
+
+std::optional<long long> Store::hexists(const std::string& key,
+                                        const std::string& field) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
+        return 0;
+    }
+    auto* hash = std::get_if<HashType>(&it->second.value);
+    if (!hash) {
+        return std::nullopt;  // WRONGTYPE
+    }
+    return hash->count(field) ? 1 : 0;
+}
+
+std::optional<long long> Store::hlen(const std::string& key) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
+        return 0;
+    }
+    auto* hash = std::get_if<HashType>(&it->second.value);
+    if (!hash) {
+        return std::nullopt;  // WRONGTYPE
+    }
+    return static_cast<long long>(hash->size());
+}
+
+Store::SeqResult Store::hgetall(const std::string& key) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
+        return {};
+    }
+    auto* hash = std::get_if<HashType>(&it->second.value);
+    if (!hash) {
+        return {true, {}};  // WRONGTYPE
+    }
+    SeqResult out;
+    out.items.reserve(hash->size() * 2);
+    for (const auto& [field, value] : *hash) {
+        out.items.push_back(field);
+        out.items.push_back(value);
+    }
+    return out;
+}
+
+// --- Persistence --------------------------------------------------------
+
 bool Store::consumeDirty() {
     return dirty_.exchange(false, std::memory_order_relaxed);
 }
 
 bool Store::saveSnapshot(const std::string& path) {
-    // Build the whole snapshot into a buffer, locking one shard at a time, then
-    // do the actual (slow) disk I/O with no locks held. Snapshotting shard by
-    // shard keeps each key internally consistent; there is no cross-shard
-    // invariant to preserve.
     std::string buf;
     buf.append(kMagic, sizeof(kMagic));
     const size_t countPos = buf.size();
-    putU32(buf, 0);  // placeholder, patched once we know the live count
+    putU32(buf, 0);  // placeholder
 
     uint32_t count = 0;
     for (auto& shard : shards_) {
@@ -243,14 +544,33 @@ bool Store::saveSnapshot(const std::string& path) {
                                entry.expireAt - now)
                                .count();
                 if (rem <= 0) {
-                    continue;  // already expired; do not persist it
+                    continue;  // already expired
                 }
                 ttlMs = rem;
             }
+
             putU32(buf, static_cast<uint32_t>(key.size()));
             buf.append(key);
-            putU32(buf, static_cast<uint32_t>(entry.value.size()));
-            buf.append(entry.value);
+
+            if (const auto* s = std::get_if<std::string>(&entry.value)) {
+                putU8(buf, kTypeString);
+                putBlob(buf, *s);
+            } else if (const auto* l = std::get_if<ListType>(&entry.value)) {
+                putU8(buf, kTypeList);
+                putU32(buf, static_cast<uint32_t>(l->size()));
+                for (const auto& item : *l) {
+                    putBlob(buf, item);
+                }
+            } else {
+                const auto& h = std::get<HashType>(entry.value);
+                putU8(buf, kTypeHash);
+                putU32(buf, static_cast<uint32_t>(h.size()));
+                for (const auto& [field, value] : h) {
+                    putBlob(buf, field);
+                    putBlob(buf, value);
+                }
+            }
+
             putI64(buf, ttlMs);
             ++count;
         }
@@ -272,8 +592,6 @@ bool Store::saveSnapshot(const std::string& path) {
         }
     }
 
-    // Rename is atomic on POSIX. On Windows it fails if the target exists, so
-    // fall back to remove-then-rename there.
     std::error_code ec;
     fs::rename(tmp, path, ec);
     if (ec) {
@@ -290,7 +608,7 @@ bool Store::loadSnapshot(const std::string& path) {
     namespace fs = std::filesystem;
     std::error_code ec;
     if (!fs::exists(path, ec)) {
-        return true;  // no snapshot yet: start empty
+        return true;  // no snapshot yet
     }
 
     std::ifstream in(path, std::ios::binary);
@@ -303,7 +621,7 @@ bool Store::loadSnapshot(const std::string& path) {
     if (buf.size() < sizeof(kMagic) ||
         std::string(buf, 0, sizeof(kMagic)) !=
             std::string(kMagic, sizeof(kMagic))) {
-        return false;  // not our format
+        return false;
     }
 
     size_t p = sizeof(kMagic);
@@ -312,33 +630,64 @@ bool Store::loadSnapshot(const std::string& path) {
         return false;
     }
 
-    // Parse everything into a temporary list first, so a corrupt file leaves
-    // the live store untouched instead of half-loaded.
+    // Parse into a temporary list first so a corrupt file leaves the live
+    // store untouched instead of half-loaded.
     std::vector<std::pair<std::string, Entry>> loaded;
     loaded.reserve(count);
     auto now = steady_clock::now();
     for (uint32_t i = 0; i < count; ++i) {
-        uint32_t keyLen = 0;
-        if (!getU32(buf, p, keyLen) || p + keyLen > buf.size()) {
+        std::string key;
+        if (!getBlob(buf, p, key)) {
             return false;
         }
-        std::string key = buf.substr(p, keyLen);
-        p += keyLen;
+        uint8_t type = 0;
+        if (!getU8(buf, p, type)) {
+            return false;
+        }
 
-        uint32_t valLen = 0;
-        if (!getU32(buf, p, valLen) || p + valLen > buf.size()) {
-            return false;
+        Entry entry;
+        if (type == kTypeString) {
+            std::string value;
+            if (!getBlob(buf, p, value)) {
+                return false;
+            }
+            entry.value = std::move(value);
+        } else if (type == kTypeList) {
+            uint32_t n = 0;
+            if (!getU32(buf, p, n)) {
+                return false;
+            }
+            ListType list;
+            for (uint32_t j = 0; j < n; ++j) {
+                std::string item;
+                if (!getBlob(buf, p, item)) {
+                    return false;
+                }
+                list.push_back(std::move(item));
+            }
+            entry.value = std::move(list);
+        } else if (type == kTypeHash) {
+            uint32_t n = 0;
+            if (!getU32(buf, p, n)) {
+                return false;
+            }
+            HashType hash;
+            for (uint32_t j = 0; j < n; ++j) {
+                std::string field, value;
+                if (!getBlob(buf, p, field) || !getBlob(buf, p, value)) {
+                    return false;
+                }
+                hash.emplace(std::move(field), std::move(value));
+            }
+            entry.value = std::move(hash);
+        } else {
+            return false;  // unknown type tag
         }
-        std::string value = buf.substr(p, valLen);
-        p += valLen;
 
         int64_t ttlMs = 0;
         if (!getI64(buf, p, ttlMs)) {
             return false;
         }
-
-        Entry entry;
-        entry.value = std::move(value);
         if (ttlMs >= 0) {
             entry.hasExpiry = true;
             entry.expireAt = now + std::chrono::milliseconds(ttlMs);
@@ -346,7 +695,6 @@ bool Store::loadSnapshot(const std::string& path) {
         loaded.emplace_back(std::move(key), std::move(entry));
     }
 
-    // Replace the keyspace: clear every shard, then route each entry home.
     for (auto& shard : shards_) {
         std::lock_guard<std::mutex> lock(shard.mtx);
         shard.data.clear();

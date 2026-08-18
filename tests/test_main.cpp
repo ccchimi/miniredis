@@ -11,6 +11,8 @@ int main() {
     test_resp();
     std::printf("running commands tests...\n");
     test_commands();
+    std::printf("running types (lists/hashes) tests...\n");
+    test_types();
     std::printf("running persistence tests...\n");
     test_persistence();
 

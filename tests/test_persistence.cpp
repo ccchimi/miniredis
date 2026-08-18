@@ -47,6 +47,30 @@ void test_persistence() {
         CHECK(b.size() == 1);
     }
 
+    // --- lists and hashes survive a save/load roundtrip ---
+    {
+        Store a;
+        a.set("s", "text");
+        a.rpush("l", {"x", "y", "z"});
+        a.hset("h", {{"f1", "v1"}, {"f2", "v2"}});
+        CHECK(a.saveSnapshot(path));
+
+        Store b;
+        CHECK(b.loadSnapshot(path));
+        CHECK_EQ(b.typeName("s"), std::string("string"));
+        CHECK_EQ(b.typeName("l"), std::string("list"));
+        CHECK_EQ(b.typeName("h"), std::string("hash"));
+
+        auto range = b.lrange("l", 0, -1);
+        CHECK(!range.wrongType);
+        CHECK(range.items.size() == 3);
+        CHECK(range.items[0] == "x" && range.items[2] == "z");
+
+        auto hg = b.hget("h", "f2");
+        CHECK_EQ(hg.value.value_or(""), std::string("v2"));
+        CHECK(b.hlen("h").value_or(-1) == 2);
+    }
+
     // --- loading a missing file yields an empty store, not an error ---
     {
         fs::remove(path);

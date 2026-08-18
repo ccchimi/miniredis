@@ -71,6 +71,26 @@ void test_persistence() {
         CHECK(b.hlen("h").value_or(-1) == 2);
     }
 
+    // --- sorted sets survive a roundtrip, order intact ---
+    {
+        Store a;
+        a.zadd("z", {{100.0, "alice"}, {90.5, "bob"}, {110.0, "carol"}});
+        CHECK(a.saveSnapshot(path));
+
+        Store b;
+        CHECK(b.loadSnapshot(path));
+        CHECK_EQ(b.typeName("z"), std::string("zset"));
+        CHECK(b.zcard("z").value_or(-1) == 3);
+        auto sc = b.zscore("z", "bob");
+        CHECK(!sc.wrongType && sc.score.has_value());
+        CHECK(sc.score.value_or(0) == 90.5);
+        // ascending by score: bob(90.5), alice(100), carol(110)
+        auto range = b.zrange("z", 0, -1);
+        CHECK(range.items.size() == 3);
+        CHECK(range.items[0].first == "bob");
+        CHECK(range.items[2].first == "carol");
+    }
+
     // --- loading a missing file yields an empty store, not an error ---
     {
         fs::remove(path);

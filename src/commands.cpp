@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <optional>
 #include <utility>
 
@@ -52,6 +55,31 @@ bool parseLongLong(const std::string& s, long long& out) {
     }
     out = negative ? -value : value;
     return true;
+}
+
+// Strictly parses a floating-point number (the whole string must be consumed).
+bool parseDouble(const std::string& s, double& out) {
+    if (s.empty()) {
+        return false;
+    }
+    char* end = nullptr;
+    double v = std::strtod(s.c_str(), &end);
+    if (end != s.c_str() + s.size()) {
+        return false;
+    }
+    out = v;
+    return true;
+}
+
+// Formats a score the way Redis does: whole numbers without a decimal point,
+// others with the shortest sensible representation.
+std::string formatScore(double d) {
+    if (std::isfinite(d) && d == std::floor(d) && std::fabs(d) < 1e17) {
+        return std::to_string(static_cast<long long>(d));
+    }
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.15g", d);
+    return buf;
 }
 
 // Parses optional trailing SET options: [EX seconds | PX milliseconds].
@@ -340,6 +368,111 @@ std::string executeCommand(Store& store, const std::vector<std::string>& args) {
             return wrongTypeErr();
         }
         return resp::encodeArray(result.items);
+    }
+
+    // --- Sorted sets ---
+    if (name == "ZADD") {
+        // ZADD key score member [score member ...]
+        if (args.size() < 4 || (args.size() % 2) != 0) {
+            return wrongArgs("zadd");
+        }
+        std::vector<std::pair<double, std::string>> members;
+        for (size_t i = 2; i + 1 < args.size(); i += 2) {
+            double score = 0;
+            if (!parseDouble(args[i], score)) {
+                return resp::encodeError("ERR value is not a valid float");
+            }
+            members.emplace_back(score, args[i + 1]);
+        }
+        auto added = store.zadd(args[1], members);
+        if (!added) {
+            return wrongTypeErr();
+        }
+        return resp::encodeInteger(*added);
+    }
+
+    if (name == "ZSCORE") {
+        if (args.size() != 3) {
+            return wrongArgs("zscore");
+        }
+        auto r = store.zscore(args[1], args[2]);
+        if (r.wrongType) {
+            return wrongTypeErr();
+        }
+        if (!r.score) {
+            return resp::encodeNil();
+        }
+        return resp::encodeBulkString(formatScore(*r.score));
+    }
+
+    if (name == "ZCARD") {
+        if (args.size() != 2) {
+            return wrongArgs("zcard");
+        }
+        auto c = store.zcard(args[1]);
+        if (!c) {
+            return wrongTypeErr();
+        }
+        return resp::encodeInteger(*c);
+    }
+
+    if (name == "ZREM") {
+        if (args.size() < 3) {
+            return wrongArgs("zrem");
+        }
+        std::vector<std::string> members(args.begin() + 2, args.end());
+        auto r = store.zrem(args[1], members);
+        if (!r) {
+            return wrongTypeErr();
+        }
+        return resp::encodeInteger(*r);
+    }
+
+    if (name == "ZRANK") {
+        if (args.size() != 3) {
+            return wrongArgs("zrank");
+        }
+        auto r = store.zrank(args[1], args[2]);
+        if (r.wrongType) {
+            return wrongTypeErr();
+        }
+        if (!r.rank) {
+            return resp::encodeNil();
+        }
+        return resp::encodeInteger(*r.rank);
+    }
+
+    if (name == "ZRANGE") {
+        // ZRANGE key start stop [WITHSCORES]
+        if (args.size() != 4 && args.size() != 5) {
+            return wrongArgs("zrange");
+        }
+        bool withScores = false;
+        if (args.size() == 5) {
+            if (toUpper(args[4]) == "WITHSCORES") {
+                withScores = true;
+            } else {
+                return resp::encodeError("ERR syntax error");
+            }
+        }
+        long long start = 0, stop = 0;
+        if (!parseLongLong(args[2], start) || !parseLongLong(args[3], stop)) {
+            return resp::encodeError(
+                "ERR value is not an integer or out of range");
+        }
+        auto r = store.zrange(args[1], start, stop);
+        if (r.wrongType) {
+            return wrongTypeErr();
+        }
+        std::vector<std::string> out;
+        out.reserve(r.items.size() * (withScores ? 2 : 1));
+        for (const auto& [member, score] : r.items) {
+            out.push_back(member);
+            if (withScores) {
+                out.push_back(formatScore(score));
+            }
+        }
+        return resp::encodeArray(out);
     }
 
     if (name == "DBSIZE") {

@@ -93,4 +93,42 @@ void test_types() {
         // GET on a non-string returns nil (a deliberate simplification)
         CHECK_EQ(run(s, {"GET", "lst"}), resp::encodeNil());
     }
+
+    // --- sorted sets ---
+    {
+        Store s;
+        CHECK_EQ(run(s, {"ZADD", "lb", "100", "alice", "90", "bob", "110",
+                         "carol"}),
+                 resp::encodeInteger(3));
+        CHECK_EQ(run(s, {"ZCARD", "lb"}), resp::encodeInteger(3));
+        CHECK_EQ(run(s, {"ZSCORE", "lb", "alice"}),
+                 resp::encodeBulkString("100"));
+        CHECK_EQ(run(s, {"ZSCORE", "lb", "missing"}), resp::encodeNil());
+
+        // updating an existing member returns 0 new and moves its rank
+        CHECK_EQ(run(s, {"ZADD", "lb", "95", "bob"}), resp::encodeInteger(0));
+        CHECK_EQ(run(s, {"ZSCORE", "lb", "bob"}), resp::encodeBulkString("95"));
+
+        // ascending order is now bob(95), alice(100), carol(110)
+        CHECK_EQ(run(s, {"ZRANK", "lb", "bob"}), resp::encodeInteger(0));
+        CHECK_EQ(run(s, {"ZRANK", "lb", "carol"}), resp::encodeInteger(2));
+        CHECK_EQ(run(s, {"ZRANGE", "lb", "0", "-1"}),
+                 resp::encodeArray({"bob", "alice", "carol"}));
+        CHECK_EQ(run(s, {"ZRANGE", "lb", "0", "-1", "WITHSCORES"}),
+                 resp::encodeArray(
+                     {"bob", "95", "alice", "100", "carol", "110"}));
+
+        // fractional scores format cleanly
+        CHECK_EQ(run(s, {"ZADD", "lb", "3.5", "dave"}), resp::encodeInteger(1));
+        CHECK_EQ(run(s, {"ZSCORE", "lb", "dave"}),
+                 resp::encodeBulkString("3.5"));
+
+        CHECK_EQ(run(s, {"ZREM", "lb", "bob"}), resp::encodeInteger(1));
+        CHECK_EQ(run(s, {"ZCARD", "lb"}), resp::encodeInteger(3));
+        CHECK_EQ(run(s, {"TYPE", "lb"}), resp::encodeSimpleString("zset"));
+
+        // wrong type
+        run(s, {"SET", "str", "x"});
+        CHECK(isWrongType(run(s, {"ZADD", "str", "1", "m"})));
+    }
 }

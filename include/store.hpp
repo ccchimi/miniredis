@@ -8,6 +8,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -45,6 +46,21 @@ public:
     struct PopResult {
         bool wrongType = false;
         std::optional<std::vector<std::string>> values;
+    };
+    // A single numeric result (e.g. ZSCORE).
+    struct ScoreResult {
+        bool wrongType = false;
+        std::optional<double> score;  // nullopt = missing
+    };
+    // A rank result (e.g. ZRANK).
+    struct RankResult {
+        bool wrongType = false;
+        std::optional<long long> rank;  // nullopt = missing
+    };
+    // Ordered [member, score] pairs (e.g. ZRANGE).
+    struct RangeResult {
+        bool wrongType = false;
+        std::vector<std::pair<std::string, double>> items;
     };
 
     // --- Strings --------------------------------------------------------
@@ -101,6 +117,24 @@ public:
     // Flattened [field0, value0, field1, value1, ...]; empty if missing.
     SeqResult hgetall(const std::string& key);
 
+    // --- Sorted sets ----------------------------------------------------
+    // Adds/updates each member with its score. Returns the number of members
+    // that were newly added (updates do not count); nullopt on wrong type.
+    std::optional<long long> zadd(
+        const std::string& key,
+        const std::vector<std::pair<double, std::string>>& members);
+    // Member's score, or nullopt if missing; wrongType set on type mismatch.
+    ScoreResult zscore(const std::string& key, const std::string& member);
+    // Number of members (0 if missing); nullopt on wrong type.
+    std::optional<long long> zcard(const std::string& key);
+    // Removes members; returns how many existed; nullopt on wrong type.
+    std::optional<long long> zrem(const std::string& key,
+                                  const std::vector<std::string>& members);
+    // 0-based rank (position by ascending score) of a member, or nullopt.
+    RankResult zrank(const std::string& key, const std::string& member);
+    // Members in rank range [start, stop] ascending (negative = from the end).
+    RangeResult zrange(const std::string& key, long long start, long long stop);
+
     // --- Persistence (snapshot / RDB-style) -----------------------------
     bool saveSnapshot(const std::string& path);
     bool loadSnapshot(const std::string& path);
@@ -110,8 +144,15 @@ private:
     using ListType = std::deque<std::string>;
     using HashType = std::unordered_map<std::string, std::string>;
 
+    // A sorted set: a member->score map for O(1) lookup, plus a set ordered by
+    // (score, member) for range/rank queries. The two are kept in sync.
+    struct ZSetType {
+        std::unordered_map<std::string, double> scores;
+        std::set<std::pair<double, std::string>> sorted;
+    };
+
     struct Entry {
-        std::variant<std::string, ListType, HashType> value;
+        std::variant<std::string, ListType, HashType, ZSetType> value;
         bool hasExpiry = false;
         std::chrono::steady_clock::time_point expireAt;
     };

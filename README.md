@@ -11,7 +11,7 @@ This is a learning-oriented reimplementation of the core ideas behind an in-memo
 - **RESP2 protocol** — connect with the standard `redis-cli`, no custom client needed
 - **Concurrent** — one thread per client over a store split into independently-locked shards, so operations on different keys run in parallel
 - **Incremental parser** — correctly handles TCP fragmentation (half commands, batched commands)
-- **Data types** — strings, lists, and hashes, with `WRONGTYPE` errors when a command targets the wrong type
+- **Data types** — strings, lists, hashes, and sorted sets, with `WRONGTYPE` errors when a command targets the wrong type
 - **Key expiration (TTL)** — both passive (evicted on access) and active (a background sweeper thread), just like Redis
 - **Persistence** — the keyspace is snapshotted to disk and restored on restart, with TTLs preserved
 - **Cross-platform** — the socket layer builds on Windows (Winsock), Linux, and macOS (POSIX)
@@ -55,6 +55,17 @@ This is a learning-oriented reimplementation of the core ideas behind an in-memo
 | `HEXISTS key field` | 1 if the field exists, else 0 |
 | `HLEN key` | Number of fields |
 | `HGETALL key` | All field/value pairs |
+
+**Sorted sets** (members ordered by a numeric score)
+
+| Command | Description |
+|---------|-------------|
+| `ZADD key score member [score member ...]` | Add/update members; returns how many were newly added |
+| `ZSCORE key member` | A member's score, or nil |
+| `ZRANK key member` | 0-based rank by ascending score, or nil |
+| `ZRANGE key start stop [WITHSCORES]` | Members in a rank range, ascending |
+| `ZREM key member [member ...]` | Removes members; returns how many existed |
+| `ZCARD key` | Number of members |
 
 Operating on a key with a command for the wrong type returns a `WRONGTYPE` error, as in Redis.
 
@@ -186,7 +197,8 @@ without an event loop.
 - [x] **Phase 6** — sharded locking: the keyspace is split into independently-locked partitions for parallel access
 - [x] **Phase 7** — data types: lists and hashes, `TYPE`, and `WRONGTYPE` errors
 - [x] **Phase 8** — a concurrent benchmark client and published throughput numbers
-- [ ] **Next ideas** — sorted sets, an event loop (epoll/IOCP) instead of thread-per-client
+- [x] **Phase 9** — sorted sets: `ZADD`, `ZSCORE`, `ZRANK`, `ZRANGE` (WITHSCORES), `ZREM`, `ZCARD`
+- [ ] **Next ideas** — an event loop (epoll/IOCP) instead of thread-per-client, replication
 
 Notes on current trade-offs, worth revisiting as the project grows:
 - The active expiration sweep scans all keys each tick; Redis instead samples a

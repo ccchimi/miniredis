@@ -1,6 +1,7 @@
 #include "store.hpp"
 
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -18,11 +19,13 @@ namespace {
 //     string: uint32 len, bytes
 //     list:   uint32 count, then count x (uint32 len, bytes)
 //     hash:   uint32 count, then count x (uint32 fLen, field, uint32 vLen, val)
+//     zset:   uint32 count, then count x (uint32 mLen, member, double score)
 //   int64  ttlMs           -1 = no expiry, else remaining milliseconds
-constexpr char kMagic[8] = {'M', 'I', 'N', 'I', 'R', 'D', 'S', '2'};
+constexpr char kMagic[8] = {'M', 'I', 'N', 'I', 'R', 'D', 'S', '3'};
 constexpr uint8_t kTypeString = 0;
 constexpr uint8_t kTypeList = 1;
 constexpr uint8_t kTypeHash = 2;
+constexpr uint8_t kTypeZSet = 3;
 
 void putU8(std::string& out, uint8_t v) { out.push_back(static_cast<char>(v)); }
 
@@ -43,6 +46,15 @@ void putI64(std::string& out, int64_t v) {
 void putBlob(std::string& out, const std::string& s) {
     putU32(out, static_cast<uint32_t>(s.size()));
     out.append(s);
+}
+
+// Doubles are stored as their raw 8-byte IEEE-754 bit pattern.
+void putDouble(std::string& out, double d) {
+    uint64_t bits;
+    std::memcpy(&bits, &d, sizeof(bits));
+    for (int i = 0; i < 8; ++i) {
+        out.push_back(static_cast<char>((bits >> (8 * i)) & 0xFF));
+    }
 }
 
 bool getU8(const std::string& s, size_t& p, uint8_t& v) {
@@ -89,6 +101,20 @@ bool getBlob(const std::string& s, size_t& p, std::string& out) {
     }
     out.assign(s, p, len);
     p += len;
+    return true;
+}
+
+bool getDouble(const std::string& s, size_t& p, double& out) {
+    if (p + 8 > s.size()) {
+        return false;
+    }
+    uint64_t bits = 0;
+    for (int i = 0; i < 8; ++i) {
+        bits |= static_cast<uint64_t>(static_cast<unsigned char>(s[p + i]))
+                << (8 * i);
+    }
+    std::memcpy(&out, &bits, sizeof(out));
+    p += 8;
     return true;
 }
 
@@ -251,7 +277,10 @@ std::string Store::typeName(const std::string& key) {
     if (std::holds_alternative<ListType>(it->second.value)) {
         return "list";
     }
-    return "hash";
+    if (std::holds_alternative<HashType>(it->second.value)) {
+        return "hash";
+    }
+    return "zset";
 }
 
 // --- Lists --------------------------------------------------------------
@@ -521,6 +550,169 @@ Store::SeqResult Store::hgetall(const std::string& key) {
     return out;
 }
 
+// --- Sorted sets --------------------------------------------------------
+
+std::optional<long long> Store::zadd(
+    const std::string& key,
+    const std::vector<std::pair<double, std::string>>& members) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
+        it = shard.data.emplace(key, Entry{ZSetType{}, false, {}}).first;
+    }
+    auto* zset = std::get_if<ZSetType>(&it->second.value);
+    if (!zset) {
+        return std::nullopt;  // WRONGTYPE
+    }
+    long long added = 0;
+    for (const auto& [score, member] : members) {
+        auto found = zset->scores.find(member);
+        if (found != zset->scores.end()) {
+            // Update: move the member to its new position in the ordered index.
+            zset->sorted.erase({found->second, member});
+            found->second = score;
+            zset->sorted.insert({score, member});
+        } else {
+            zset->scores.emplace(member, score);
+            zset->sorted.insert({score, member});
+            ++added;
+        }
+    }
+    dirty_.store(true, std::memory_order_relaxed);
+    return added;
+}
+
+Store::ScoreResult Store::zscore(const std::string& key,
+                                 const std::string& member) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
+        return {};
+    }
+    auto* zset = std::get_if<ZSetType>(&it->second.value);
+    if (!zset) {
+        return {true, std::nullopt};  // WRONGTYPE
+    }
+    auto found = zset->scores.find(member);
+    if (found == zset->scores.end()) {
+        return {};
+    }
+    return {false, found->second};
+}
+
+std::optional<long long> Store::zcard(const std::string& key) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
+        return 0;
+    }
+    auto* zset = std::get_if<ZSetType>(&it->second.value);
+    if (!zset) {
+        return std::nullopt;  // WRONGTYPE
+    }
+    return static_cast<long long>(zset->scores.size());
+}
+
+std::optional<long long> Store::zrem(const std::string& key,
+                                     const std::vector<std::string>& members) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
+        return 0;
+    }
+    auto* zset = std::get_if<ZSetType>(&it->second.value);
+    if (!zset) {
+        return std::nullopt;  // WRONGTYPE
+    }
+    long long removed = 0;
+    for (const auto& member : members) {
+        auto found = zset->scores.find(member);
+        if (found != zset->scores.end()) {
+            zset->sorted.erase({found->second, member});
+            zset->scores.erase(found);
+            ++removed;
+        }
+    }
+    if (zset->scores.empty()) {
+        shard.data.erase(it);
+    }
+    if (removed > 0) {
+        dirty_.store(true, std::memory_order_relaxed);
+    }
+    return removed;
+}
+
+Store::RankResult Store::zrank(const std::string& key,
+                               const std::string& member) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
+        return {};
+    }
+    auto* zset = std::get_if<ZSetType>(&it->second.value);
+    if (!zset) {
+        return {true, std::nullopt};  // WRONGTYPE
+    }
+    auto found = zset->scores.find(member);
+    if (found == zset->scores.end()) {
+        return {};
+    }
+    // Rank = number of members ordered before (score, member).
+    auto pos = zset->sorted.find({found->second, member});
+    long long rank = std::distance(zset->sorted.begin(), pos);
+    return {false, rank};
+}
+
+Store::RangeResult Store::zrange(const std::string& key, long long start,
+                                 long long stop) {
+    Shard& shard = shardFor(key);
+    std::lock_guard<std::mutex> lock(shard.mtx);
+    auto it = findLive(shard.data, key);
+    if (it == shard.data.end()) {
+        return {};
+    }
+    auto* zset = std::get_if<ZSetType>(&it->second.value);
+    if (!zset) {
+        return {true, {}};  // WRONGTYPE
+    }
+
+    const long long len = static_cast<long long>(zset->sorted.size());
+    if (start < 0) {
+        start += len;
+    }
+    if (stop < 0) {
+        stop += len;
+    }
+    if (start < 0) {
+        start = 0;
+    }
+    if (stop >= len) {
+        stop = len - 1;
+    }
+
+    RangeResult out;
+    if (start > stop) {
+        return out;
+    }
+    // std::set iterates in ascending (score, member) order.
+    long long i = 0;
+    for (const auto& [score, member] : zset->sorted) {
+        if (i > stop) {
+            break;
+        }
+        if (i >= start) {
+            out.items.emplace_back(member, score);
+        }
+        ++i;
+    }
+    return out;
+}
+
 // --- Persistence --------------------------------------------------------
 
 bool Store::consumeDirty() {
@@ -561,13 +753,20 @@ bool Store::saveSnapshot(const std::string& path) {
                 for (const auto& item : *l) {
                     putBlob(buf, item);
                 }
-            } else {
-                const auto& h = std::get<HashType>(entry.value);
+            } else if (const auto* h = std::get_if<HashType>(&entry.value)) {
                 putU8(buf, kTypeHash);
-                putU32(buf, static_cast<uint32_t>(h.size()));
-                for (const auto& [field, value] : h) {
+                putU32(buf, static_cast<uint32_t>(h->size()));
+                for (const auto& [field, value] : *h) {
                     putBlob(buf, field);
                     putBlob(buf, value);
+                }
+            } else {
+                const auto& z = std::get<ZSetType>(entry.value);
+                putU8(buf, kTypeZSet);
+                putU32(buf, static_cast<uint32_t>(z.sorted.size()));
+                for (const auto& [score, member] : z.sorted) {
+                    putBlob(buf, member);
+                    putDouble(buf, score);
                 }
             }
 
@@ -680,6 +879,22 @@ bool Store::loadSnapshot(const std::string& path) {
                 hash.emplace(std::move(field), std::move(value));
             }
             entry.value = std::move(hash);
+        } else if (type == kTypeZSet) {
+            uint32_t n = 0;
+            if (!getU32(buf, p, n)) {
+                return false;
+            }
+            ZSetType zset;
+            for (uint32_t j = 0; j < n; ++j) {
+                std::string member;
+                double score = 0;
+                if (!getBlob(buf, p, member) || !getDouble(buf, p, score)) {
+                    return false;
+                }
+                zset.scores.emplace(member, score);
+                zset.sorted.insert({score, member});
+            }
+            entry.value = std::move(zset);
         } else {
             return false;  // unknown type tag
         }
